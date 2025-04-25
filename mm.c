@@ -73,60 +73,10 @@ team_t team = {
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
 void * heap_listp;
-// extend_heap이 호출되는 경로 두 가지
-    // 1. 힙이 초기화 되는 경우
-    // 2. mm_malloc이 적당한 fit을 찾지 못한 경우
-static void *extend_heap(size_t words)
-{
-    char *ptr;
-    size_t size;
 
-    /* Allocate an even number of words to maintain alignment */
-    size = (words % 2) ? (words + 1) * WSIZE : words * WSIZE;
-    // 사이즈는 짝수인지 아닌지에 따라 배정되는 값이 조금 다르다 :
-        // 짝수인경우 : words 에 WSIZE를 곱한만큼 배정한다.
-        // 홀수인경우 : words + 1 에 WSIZE를 곱한만큼 배정한다.
-    if ((long) (ptr = mem_sbrk(size)) == -1)
-        return NULL;
-    // 방금 계산한 size를 sbrk에 때린다. 그래서 결과가 구리면 여기서 즉시 종료.
-    // ptr은 여기서 배정이 끝났다.
-
-    /* Initialize free block header/footer and the epilogue header */
-    PUT(HDRP(ptr), PACK(size, 0));
-    // ptr의 Header 부분에서 값 배정 시도 : 물론 할당 된 것은 아님
-    PUT(FTRP(ptr), PACK(size, 0));
-    // ptr의 Footer 부분에서 값 배정 시도 : 위와 같이, 할당 된 것은 아님
-    PUT(HDRP(NEXT_BLKP(ptr)), PACK(0, 1));
-    // 다음 블럭의 헤드에 뭔가를 배정하네? 이게 뭐임?
-
-    return coalence(ptr);
-}
-/* 
- * mm_init - initialize the malloc package.
- */
-int mm_init(void)
-{
-    /* 텅 비어있는 힙을 생성할 것이다!!!*/
-    if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void *) - 1)
-        return -1;
-    // mem_sbrk에서 상태가 꼬롬하게 되어버리면 (void*) -1을 뱉는다.
-    // 즉 실패 플래그를 감지하는 조건문
-
-    PUT(heap_listp, 0); // Alignment padding
-    PUT(heap_listp + (1 * WSIZE), PACK(DSIZE, 1)); // 프롤로그 Header
-    PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1)); // 프롤로그 Footer
-    PUT(heap_listp + (3 * WSIZE), PACK(0, 1)); // 에필로그 Header
-    heap_listp += (2 * WSIZE); 
-
-
-    // 초기 초기화 루틴을 CHUNKSIZE / WSIZE 만큼 확장 시도를 한다.
-    if(extend_heap(CHUNKSIZE/WSIZE) == NULL)
-        return -1;
-    return 0;
-}
 
 /* coalesce : 경계 태그 연결을 사용하여 상수 시간에 인접 가용 블록들과 통합.*/
-static void *coalence(void *ptr)
+static void* coalence(void *ptr)
 {
     // 경계 태그라는 개념을 코드에 반영..!! 이 내용은 번역본 820p에 있다.
 
@@ -180,15 +130,116 @@ static void *coalence(void *ptr)
 }
 
 
+// extend_heap이 호출되는 경로 두 가지
+    // 1. 힙이 초기화 되는 경우
+    // 2. mm_malloc이 적당한 fit을 찾지 못한 경우
+static void *extend_heap(size_t words)
+{
+    char *ptr;
+    size_t size;
+
+    /* Allocate an even number of words to maintain alignment */
+    size = (words % 2) ? (words + 1) * WSIZE : words * (WSIZE);
+    // 사이즈는 짝수인지 아닌지에 따라 배정되는 값이 조금 다르다 :
+        // 짝수인경우 : words 에 WSIZE를 곱한만큼 배정한다.
+        // 홀수인경우 : words + 1 에 WSIZE를 곱한만큼 배정한다.
+    if ((long) (ptr = mem_sbrk(size)) == -1)
+        return NULL;
+    // 방금 계산한 size를 sbrk에 때린다. 그래서 결과가 구리면 여기서 즉시 종료.
+    // ptr은 여기서 배정이 끝났다.
+
+    /* Initialize free block header/footer and the epilogue header */
+    PUT(HDRP(ptr), PACK(size, 0));
+    // ptr의 Header 부분에서 값 배정 시도 : 물론 할당 된 것은 아님
+    PUT(FTRP(ptr), PACK(size, 0));
+    // ptr의 Footer 부분에서 값 배정 시도 : 위와 같이, 할당 된 것은 아님
+    PUT(HDRP(NEXT_BLKP(ptr)), PACK(0, 1));
+    // 다음 블럭의 헤드에 뭔가를 배정하네? 이게 뭐임?
+
+    return coalence(ptr);
+}
+/* 
+ * mm_init - initialize the malloc package.
+ */
+int mm_init(void)
+{
+    /* 텅 비어있는 힙을 생성할 것이다!!!*/
+    if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void *) - 1)
+        return -1;
+    // mem_sbrk에서 상태가 꼬롬하게 되어버리면 (void*) -1을 뱉는다.
+    // 즉 실패 플래그를 감지하는 조건문
+    // heap_listp는 mem_sbrk을 통해 에필로그 헤더를 가리키게 한다.
+
+
+    PUT(heap_listp, 0); // Alignment padding
+    PUT(heap_listp + (1 * WSIZE), PACK(DSIZE, 1)); // 프롤로그 Header
+    PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1)); // 프롤로그 Footer
+    // 
+    PUT(heap_listp + (3 * WSIZE), PACK(0, 1)); // 에필로그 Header
+    heap_listp += (2 * WSIZE); 
+    // 프롤로그 Footer에서부터 시작하는 heap_listp
+
+
+    // 초기 초기화 루틴을 CHUNKSIZE / WSIZE 만큼 확장 시도를 한다.
+    if(extend_heap(CHUNKSIZE/WSIZE) == NULL)
+        return -1;
+    return 0;
+}
+
 static void *find_fit(size_t asize)
 {
-    void *ptr;
+    void *ptr ;
+    // asize가 필요로 하는 공간 크기이다.
+    // 반복문을 돌면서 가용 메모리 목록을 돌아본다.
+    // 가용 메모리 목록에서 asize가 들어가기 적합하다면 해당 값을 리턴한다.
+    // 근데 이제보니까 heap_listp는 가상 메모리에서 맨 끝부터 시작한다. 그러니 reverse 해야한다.
+        // 즉 배열 끝에서 반대로 순회한다고 생각하면 쉽다. 근데 이래도 끝낼 공간이
 
+    
+    for(ptr = heap_listp; GET_SIZE(HDRP(ptr)) > 0; ptr = NEXT_BLKP(ptr))
+    {
+        // GET ALLOC 부분이 이상하다
+        // if(asize <= GET_SIZE(HDRP(ptr))  && GET_ALLOC(HDRP(PREV_BLKP(ptr))) != 1) : 기존 내용
+        if(asize <= GET_SIZE(HDRP(ptr))  && GET_ALLOC(HDRP(ptr)) != 1)
+            return ptr;
+    }
+    // 반복문이 끝난다면 전체 메모리에서 찾질 못한 것.
+    return NULL;
 }
 
 static void place(void *ptr, size_t asize)
 {
+    // 이 함수 입장에서 인지 하고 있는 것 :
+        //  ptr이라는 위치에 asize 만큼의 공간을 활용해야 할 것
     size_t csize = GET_SIZE(HDRP(ptr));
+    /*
+    요청한 블록을 가용 블록의 시작 부분에 배치해야 한다.
+    나머지 부분의 크기는 최소 블록 크기와 같거나 큰 경우에만 분할 해야 한다.
+    */
+
+    // 옵션으로 초과 부분을 분할하는 역할
+    if((csize - asize) >= (2 *DSIZE))
+    {
+        // Double Word 에 Double 보다 큰 결과는 분할을 시도하게끔 한다.
+        PUT(HDRP(ptr), PACK(asize, 1));
+        PUT(FTRP(ptr), PACK(asize, 1));
+
+        ptr = NEXT_BLKP(ptr);
+        PUT(HDRP(ptr), PACK(csize - asize, 0));
+        PUT(FTRP(ptr), PACK(csize - asize, 0));
+    } 
+    else
+    {
+        PUT(HDRP(ptr), PACK(csize, 1));
+        PUT(FTRP(ptr), PACK(csize, 1));
+    }
+
+    /*
+    2 * DSIZE는 FOOTER 4Byte, HEADER 4Byte, Min Space 8Byte 해서 16Byte인걸 반영한 내용이다.
+    64비트로 넘어가면 양방향 정확히 2배가 되기때문에, 16byte 이상의 내용이라면 활용 가능이니 해당 부분을 분할 하는 것.
+    */
+
+    
 }
 
 /* 
@@ -219,6 +270,7 @@ void *mm_malloc(size_t size)
         place(ptr, asize);
         return ptr;
     }
+    // 적절한 크기를 find_fit으로 시도한다.
 
     extendSize = MAX(asize, CHUNKSIZE);
     if ((ptr = extend_heap(extendSize/WSIZE)) == NULL)
@@ -238,7 +290,7 @@ void mm_free(void *ptr)
 
     PUT(HDRP(ptr), PACK(size, 0));
     PUT(FTRP(ptr), PACK(size, 0));
-    coalense(ptr);
+    coalence(ptr);
 }
 
 /*
@@ -246,17 +298,27 @@ void mm_free(void *ptr)
  */
 void *mm_realloc(void *ptr, size_t size)
 {
+    if(ptr == NULL)
+        return mm_malloc(size);
+
+    if(size <= 0)
+    {
+        mm_free(ptr);
+        return 0;
+    }
+
     void *oldptr = ptr;
-    void *newptr;
-    size_t copySize;
-    
-    newptr = mm_malloc(size);
+    void *newptr = mm_malloc(size);
+   
     if (newptr == NULL)
       return NULL;
-    copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
+    
+    size_t copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
     if (size < copySize)
       copySize = size;
-    memcpy(newptr, oldptr, copySize);
+
+    memcpy(newptr, oldptr, copySize); // 얘가 중요하다
+
     mm_free(oldptr);
     return newptr;
 }
