@@ -22,6 +22,9 @@ static char *mem_max_addr;   /* largest legal heap address */
 /* 
  * mem_init - initialize the memory system model
  */
+
+ /* Private global variables */
+
 void mem_init(void)
 {
     /* allocate the storage we will use to model the available VM */
