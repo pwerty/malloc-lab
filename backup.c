@@ -46,8 +46,8 @@ int find_size_class_index(size_t size);
 #define MAX_SIZE_CLASS 7
 
 /* Basic constants and macros */
-#define WSIZE 4 /* 워드와 푸터의 사이즈, 바이트 단위 */
-#define DSIZE 8 /* 더블 워드 사이즈 */
+#define WSIZE 8 /* 워드와 푸터의 사이즈, 바이트 단위 */
+#define DSIZE 16 /* 더블 워드 사이즈 */
 #define CHUNKSIZE (1<<12)
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
@@ -91,8 +91,6 @@ void* freeList7 = NULL;
 
 static void* coalesce(void *ptr)
 {
-    void ** prev_block = PREV_BLKP(ptr);
-    void ** next_block = NEXT_BLKP(ptr);
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(ptr)));
     size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(ptr)));
     size_t size = GET_SIZE(HDRP(ptr));
@@ -267,6 +265,60 @@ void mm_free(void *ptr)
     coalesce(ptr);
 }
 
+void relist(void *bps){
+    void *bp = bps;
+    void **targetList = getListPointer(find_size_class_index(GET_SIZE(HDRP(bp))));
+        while (GET_SIZE(HDRP(bp)) > 0)
+    {
+        if (!GET_ALLOC(HDRP(bp))) 
+            add_freeList(bp, targetList);                                         
+        bp = NEXT_BLKP(bp);                                        
+    }
+}
+
+void *mm_realloc(void *ptr, size_t size)
+{ 
+    int re = 0;
+
+    if (ptr == NULL) // 포인터가 NULL인 경우 할당만 수행
+    return mm_malloc(size);
+
+if (size <= 0) // size가 0인 경우 메모리 반환만 수행
+{
+    mm_free(ptr);
+    return 0;
+}
+
+    
+void *newptr = mm_malloc(size); // 새로 할당한 블록의 포인터
+if (newptr == NULL)
+    return NULL; 
+
+size_t copySize = GET_SIZE(HDRP(ptr)) - DSIZE; 
+if (size < copySize){
+    copySize = size;
+    re = 1;
+}                           
+                              
+
+memcpy(newptr, ptr, copySize); // 새 블록으로 데이터 복사
+
+if(re){
+    freeList0 = NULL;
+    freeList1 = NULL;
+    freeList2 = NULL;
+    freeList3 = NULL;
+    freeList4 = NULL;
+    freeList5 = NULL;
+    freeList6 = NULL;
+    freeList7 = NULL;
+    relist(newptr);
+} 
+    mm_free(ptr);
+    return newptr;
+
+}
+
 void add_freeList(void *bp, void **targetList)
 {
     
@@ -333,59 +385,4 @@ int find_size_class_index(size_t size)
     else if (size <= 768) return 5;
     else if (size <= 1536) return 6;
     else return 7;
-}
-
-// 최후방 구현 목표
-void relist(void *bps){
-    void *bp = bps;
-    void **targetList = getListPointer(find_size_class_index(GET_SIZE(HDRP(bp))));
-        while (GET_SIZE(HDRP(bp)) > 0)
-    {
-        if (!GET_ALLOC(HDRP(bp))) 
-            add_freeList(bp, targetList);                                         
-        bp = NEXT_BLKP(bp);                                        
-    }
-}
-
-void *mm_realloc(void *ptr, size_t size)
-{ 
-    int re = 0;
-
-    if (ptr == NULL) // 포인터가 NULL인 경우 할당만 수행
-    return mm_malloc(size);
-
-if (size <= 0) // size가 0인 경우 메모리 반환만 수행
-{
-    mm_free(ptr);
-    return 0;
-}
-
-    
-void *newptr = mm_malloc(size); // 새로 할당한 블록의 포인터
-if (newptr == NULL)
-    return NULL; 
-
-size_t copySize = GET_SIZE(HDRP(ptr)) - DSIZE; 
-if (size < copySize){
-    copySize = size;
-    re = 1;
-}                           
-                              
-
-memcpy(newptr, ptr, copySize); // 새 블록으로 데이터 복사
-
-if(re){
-    freeList0 = NULL;
-    freeList1 = NULL;
-    freeList2 = NULL;
-    freeList3 = NULL;
-    freeList4 = NULL;
-    freeList5 = NULL;
-    freeList6 = NULL;
-    freeList7 = NULL;
-    relist(newptr);
-} 
-    mm_free(ptr);
-    return newptr;
-
 }
