@@ -24,7 +24,7 @@
  ********************************************************/
 team_t team = {
     /* Team name */
-    "VILLIAN_KWON v3",
+    "VILLIAN_KWON v4",
     /* First member's full name */
     "kwon woo hyeon",
     /* First member's email address */
@@ -35,26 +35,47 @@ team_t team = {
     ""
 };
 
+/*
+ 1차 시도. 
+    * 이 코드는 WSIZE 4에서만 작동을 보장해야한다.
+    * coalesce 함수를 보다 확실히 하기 위해 prev/next block을 사전 선언 하였다.
+        * 여기서 매크로 GET_TOTAL_SIZE 추가 되었다. 헤더 푸더 합친 진짜 블록 크기 계산이 필요했다.
+    * Free List Remove 함수를 보다 의도에 맞게 수정.
+        * remove 하고자하는 아이템에 대한 안전 장치로, remove 자체에서 주소를 조회하도록 수정
+    * 새 문제점.. Segregate #1에서 내가 find fit에서 remove를 안했던가? Place에서 제거하도록 되어있을텐데..
+    * add Freelist에 대한 분기문에 대해 더 많은 상황을 수용 할 수 있도록 개선
+    * mm_init에서 free List에 대해 초기화 수행하도록 개선
+    * coalesce의 기능을 축소하고 함수 역할 분리
+    * 매크로가 전체적으로 바뀌면서 Header의 직접 가리키는 내용을 제거하되, Header 포인터를 별도로 다룰 여지를 남김
+*/
+
 static void *coalesce(void *ptr);
 static void *extend_heap(size_t words);
-void add_freeList(void *bp, void **targetList);
-void remove_freeList(void *bp, void **targetList);
+static void add_freeList(char **bp);
+static void remove_freeList(char **bp);
 
 
 void** getListPointer(int idx);
-int find_size_class_index(size_t size);
+static size_t sizeWizard(size_t size);
 #define MAX_SIZE_CLASS 7
+#define MAX_POWER 50
+
+#define STATUS_BIT_SIZE 3 // bits
+#define HDR_SIZE 1 // in words
+#define FTR_SIZE 1 // in words
+#define PRED_FIELD_SIZE 1 // in words
+#define EPILOG_SIZE 2 // in words
 
 /* Basic constants and macros */
 #define WSIZE 4 /* 워드와 푸터의 사이즈, 바이트 단위 */
 #define DSIZE 8 /* 더블 워드 사이즈 */
-#define CHUNKSIZE (1<<12)
+#define CHUNKSIZE (1<<12/WSIZE)
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 #define PACK(size, alloc) ((size) | (alloc))
-
-#define GET(p) (*(unsigned int *)(p))
-#define PUT(p, val) (*(unsigned int*)(p) = (val))
+#define GET_BYTE(p) (*(char *)(p))
+#define GET_WORD(p) (*(unsigned int *)(p))
+#define PUT_WORD(p, val) (*(char **)(p) = (val))
 
 /* Read the size and allocated fields form address p */
 #define GET_SIZE(p) (GET(p) & ~0x7)
@@ -62,131 +83,147 @@ int find_size_class_index(size_t size);
 #define GET_ALLOC(p) (GET(p) & 0x1)
 // 0x1은 맨 우측의 1비트만 보겠다는 것.
 
-#define HDRP(bp)  ((char *)(bp) - WSIZE)
-#define FTRP(bp)  ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
+#define GET_TOTAL_SIZE(p) (GET_SIZE(p) + (WSIZE / 2))
 
-#define PREV_FREE(bp) (*(void **)(bp))
-#define NEXT_FREE(bp) (*(void **)((char *)(bp) + WSIZE))
+// Footer만 사용
+#define FTRP(headp) ((char **)(headp) + GET_SIZE(headp) + HDR_SIZE)
 
-#define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
-#define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
+// FREE LIST 단위의 전 후 블럭에 대한 정보를 가져오는 매크로 4셋.
+#define GET_PTR_PRED(ptr) ((char **)(ptr) + HDR_SIZE)
+#define GET_PTR_SUCC(ptr) ((char **)(ptr) + HDR_SIZE + PRED_FIELD_SIZE)
 
+#define PREV_FREE(bp) (*(GET_PTR_PRED(bp)))
+#define NEXT_FREE(bp) (*(GET_PTR_SUCC(bp)))
 
+// 힙 상에 있는 블록에 대해 조회하는 함수.
+#define PREV_BLKP(bp) ((char **)(bp) - GET_TOTAL_SIZE(((char **)(bp) - FTR_SIZE)))
+#define NEXT_BLKP(bp) (FTRP(bp) + FTR_SIZE)
 
+// GET : i번째에 있는 freeList 리턴, 즉 얘는 일종의 index selector를 주소단위로 수행하는 것이다.
+// SET : GET과 비슷한 계산을 때리지만 이건 값이 직접 변경된다는 점에서 놀랄만 하다.
+#define GET_FREELIST_PTR(i) (*(freeLists+i))
+#define SET_FREELIST_PTR(i, ptr) (*(freeLists+i) = ptr)
+
+// 가용 리스트에 있는 블록들에 대해 prev, next를 SET 하는 함수
+#define SET_PTR(p, ptr) (*(char **)(p) = (char *)(ptr))
+
+#define EVENIZE(x) ((x + 1) & ~1)
 /* single word (4) or double word (8) alignment */
 #define ALIGNMENT (WSIZE * 2)
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~0x7)
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
-void* heap_listp;
-void* freeList0 = NULL;
-void* freeList1 = NULL;
-void* freeList2 = NULL;
-void* freeList3 = NULL;
-void* freeList4 = NULL;
-void* freeList5 = NULL;
-void* freeList6 = NULL;
-void* freeList7 = NULL;
+static char **freeLists;
+static char **heapPtr;
 
 static void* coalesce(void *ptr)
 {
+    // 여기의 *ptr은 header를 가리키는가?
     void ** prev_block = PREV_BLKP(ptr);
     void ** next_block = NEXT_BLKP(ptr);
-    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(ptr)));
-    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(ptr)));
-    size_t size = GET_SIZE(HDRP(ptr));
-    void **targetList = NULL;
-    int pos;
+    size_t prev_alloc = GET_ALLOC(prev_block);
+    size_t next_alloc = GET_ALLOC(next_block);
+    size_t size = GET_SIZE(ptr);
 
     if (prev_alloc && next_alloc)
     {
-        pos = find_size_class_index(size);
-        targetList = getListPointer(pos);
-
-        add_freeList(ptr, targetList);
         return ptr;
     }
     else if (prev_alloc && !next_alloc)
     {
-        size += GET_SIZE(HDRP(NEXT_BLKP(ptr)));
-        pos = find_size_class_index(GET_SIZE(HDRP(NEXT_BLKP(ptr))));
-        targetList = getListPointer(pos);
+        remove_freeList(next_block);
+        size += GET_TOTAL_SIZE(next_block);
 
-        remove_freeList(NEXT_BLKP(ptr), targetList);
-        PUT(HDRP(ptr), PACK(size, 0));
-        PUT(FTRP(ptr), PACK(size, 0));
+        PUT_WORD(ptr, PACK(size, 0));
+        PUT_WORD(FTRP(ptr), PACK(size, 0));
     }
     else if (!prev_alloc && next_alloc)
     {
-        // 여기 Footer Header 상태가 이상한데.. 확인 필요
-        size += GET_SIZE(HDRP(PREV_BLKP(ptr)));
-        pos = find_size_class_index(GET_SIZE(HDRP(PREV_BLKP(ptr))));
-        targetList = getListPointer(pos);
+        remove_freeList(prev_block);
+        size += GET_TOTAL_SIZE(prev_block);
 
-        remove_freeList(PREV_BLKP(ptr), targetList);
-        PUT(FTRP(ptr), PACK(size, 0));
-        PUT(HDRP(PREV_BLKP(ptr)), PACK(size, 0));
-        ptr = PREV_BLKP(ptr);
+        PUT_WORD(prev_block, PACK(size, 0 ));
+        PUT_WORD(FTRP(ptr), PACK(size, 0));
+        ptr = prev_block;
     }
     else
     {
-        size += GET_SIZE(HDRP(PREV_BLKP(ptr))) +
-        GET_SIZE(FTRP(NEXT_BLKP(ptr)));
-
-        pos = find_size_class_index(GET_SIZE(HDRP(PREV_BLKP(ptr))));
-        targetList = getListPointer(pos);
-        remove_freeList(PREV_BLKP(ptr), targetList);
-
-        pos = find_size_class_index(GET_SIZE(FTRP(NEXT_BLKP(ptr))));
-        targetList = getListPointer(pos);
-        remove_freeList(NEXT_BLKP(ptr), targetList);
-        
-        PUT(HDRP(PREV_BLKP(ptr)), PACK(size, 0));
-        PUT(FTRP(NEXT_BLKP(ptr)), PACK(size, 0));
-        ptr = PREV_BLKP(ptr);
+        remove_freeList(prev_block);
+        remove_freeList(next_block);
+        size += (GET_TOTAL_SIZE(prev_block) + GET_TOTAL_SIZE(next_block));
+ 
+        PUT_WORD(prev_block, PACK(size, 0));
+        PUT_WORD(FTRP(next_block), PACK(size, 0));
+        ptr = prev_block;
     }
-
-    pos = find_size_class_index(size);
-    targetList = getListPointer(pos);
-    add_freeList(ptr, targetList);
-
     return ptr;
 }
 
 static void *extend_heap(size_t words)
 {
-    char *ptr;
-    size_t size;
-    size = (words % 2) ? (words + 1) * WSIZE : words * (WSIZE);
-    if ((long) (ptr = mem_sbrk(size)) == -1)
+    char **ptr;
+    char **end_ptr;
+    size_t words_extend = EVENIZE(words); // make sure double aligned
+    size_t total_words = words_extend + HDR_SIZE + FTR_SIZE;
+    // 여기가 그 람다 식 대신 부여된 내용이구나?
+    if ((long)(ptr = mem_sbrk((total_words) * WSIZE)) == -1) {
         return NULL;
-    PUT(HDRP(ptr), PACK(size, 0));
-    PUT(FTRP(ptr), PACK(size, 0));
-    PUT(HDRP(NEXT_BLKP(ptr)), PACK(0, 1));
-    return coalesce(ptr);
+    }
+
+    ptr -= EPILOG_SIZE;
+
+    // set new block header/footer to size (in words)
+    PUT_WORD(ptr, PACK(words_extend, 0));
+    PUT_WORD(FTRP(ptr), PACK(words_extend, 0));
+    
+    // add epilog to the end
+    end_ptr = ptr + total_words;
+    PUT_WORD(end_ptr, PACK(0, 1));
+    PUT_WORD(FTRP(end_ptr), PACK(0, 1));
+    
+    return ptr;
 }
 
 int mm_init(void)
-{    // np
-    if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void *) - 1)
+{   
+    int even_max_power = EVENIZE(MAX_POWER);
+    if ((long)(freeLists = mem_sbrk(even_max_power* sizeof(char *))) == -1)
         return -1;
-    PUT(heap_listp, 0); // Alignment padding
-    PUT(heap_listp + (1 * WSIZE), PACK(DSIZE, 1)); // 프롤로그 Header
-    PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1)); // 프롤로그 Footer
-    PUT(heap_listp + (3 * WSIZE), PACK(0, 1));
-    heap_listp += (2 * WSIZE); 
 
-    // 초기 초기화 루틴을 CHUNKSIZE / WSIZE 만큼 확장 시도를 한다.
-    if(extend_heap(CHUNKSIZE/WSIZE) == NULL)
+    for (int i = 0; i <= MAX_POWER; i++) 
+    {
+        SET_FREE_LIST_PTR(i, NULL);
+    }
+
+    mem_sbrk(WSIZE);
+
+    if ((long)(heapPtr = mem_sbrk(4*WSIZE)) == -1)
         return -1;
+
+     
+        PUT_WORD(heapPtr, PACK(0, 1)); // Prolog header
+        PUT_WORD(FTRP(heapPtr), PACK(0, 1)); // Prolog footer
+    
+        char ** epilog = NEXT_BLKP(heapPtr);
+        PUT_WORD(epilog, PACK(0, 1)); // Epilog header
+        PUT_WORD(FTRP(epilog), PACK(0, 1)); // Epilog footer
+    
+        heapPtr += (HDR_SIZE + FTR_SIZE); // Move past prolog
+    
+        char **new_block;
+        if(new_block = extend_heap(CHUNKSIZE) == NULL)
+            return -1;
+    
+        add_freeList(new_block);
     return 0;
 }
 
 static void *find_fit(size_t asize)
 {
-    int class_idx = find_size_class_index(asize);
     void *bp;
+    size_t class_idx = sizeWizard(asize);
+
 
     // class_idx 부터 MAX_SIZE_CLASS까지 차례대로 탐색
     for (; class_idx <= MAX_SIZE_CLASS; class_idx++) {
@@ -201,191 +238,298 @@ static void *find_fit(size_t asize)
     return NULL;  // 못 찾으면 NULL
 }
 
-static void place(void *ptr, size_t asize)
+static void place(void *ptr, size_t reqSize)
 { 
-    size_t csize = GET_SIZE(HDRP(ptr));
-    int pos = find_size_class_index(csize);
-    void **targetList = getListPointer(pos);
+    size_t ptrSize = GET_SIZE(ptr);
+    size_t total_ptrSize = ptrSize + (HDR_SIZE + FTR_SIZE);
 
-    if((csize - asize) >= (2 *DSIZE))
+    size_t requireSize = reqSize;
+    size_t total_requireSize = reqSize + (HDR_SIZE + FTR_SIZE);
+
+    int total_newBlockSize = total_ptrSize - total_requireSize;
+    int newBlockSize = total_newBlockSize - (HDR_SIZE + FTR_SIZE);
+    
+    char** newBlock;
+
+    if((int)newBlockSize > 0)
     {
-        PUT(HDRP(ptr), PACK(asize, 1));
-        PUT(FTRP(ptr), PACK(asize, 1));
-        remove_freeList(ptr, targetList);
+        newBlock = (char **)(ptr) + total_requireSize;
 
-        ptr = NEXT_BLKP(ptr);
+        // set new block's size and status
+        PUT_WORD(newBlock, PACK(newBlockSize, 0));
+        PUT_WORD(FTRP(newBlock), PACK(newBlockSize, 0));
+         
+        // set ptr size to exact needed size
+        PUT_WORD(ptr, PACK(requireSize, 1));
+        PUT_WORD(FTRP(ptr), PACK(requireSize, 1));
+         
+        // check if new block can become larger than it is
+        newBlock = coalesce(newBlock);
+         
+        // handle this new block by putting back into free list
+        add_freeList(newBlock);
+    }
+    else if(newBlockSize == 0)
+    {
+        requireSize += (HDR_SIZE + FTR_SIZE);
 
-        pos = find_size_class_index(csize - asize);
-        targetList = getListPointer(pos);
-        PUT(HDRP(ptr), PACK(csize - asize, 0));
-        PUT(FTRP(ptr), PACK(csize - asize, 0));
-        add_freeList(ptr, targetList);
-    } 
+        PUT_WORD(ptr, PACK(requireSize, 1));
+        PUT_WORD(FTRP(ptr), PACK(requireSize, 1 ));
+    }
     else
     {
-        PUT(HDRP(ptr), PACK(csize, 1));
-        PUT(FTRP(ptr), PACK(csize, 1));
-        remove_freeList(ptr, targetList);
+        PUT_WORD(ptr, PACK(requireSize, 1));
+        PUT_WORD(FTRP(ptr), PACK(requireSize, 1));
     }
-    
 }
 
 void *mm_malloc(size_t size)
-{ // np
-    size_t asize;
+{
+
+    if (size <= 1<<12) {
+        size = round_up_power_2(size);
+    }
+    // ALMOST SOLVED, maybe problem when GET_SIZE(HDRP(ptr)) / WSIZE have problem or small functions.
+    size_t words = ALIGN(size) / WSIZE;
     size_t extendSize;
-    char *ptr;
+    char **ptr;
 
     if (size == 0)
         return NULL;
 
-    if (size <= DSIZE)
-        asize = 2*DSIZE;
-    else
-        asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE); 
+    if ((ptr = find_fit(words)) == NULL)
+    {  
+        extendSize = MAX(words, CHUNKSIZE);
+        if ((ptr = extend_heap(extendSize/WSIZE)) == NULL)
+            return NULL;
 
-    if ((ptr = find_fit(asize)) != NULL)
-    {
-        place(ptr, asize);
-        return ptr;
+        place(ptr, words);
+        return ptr + GET_SIZE(HDRP(ptr)) / WSIZE;
     }
 
-    extendSize = MAX(asize, CHUNKSIZE);
-    if ((ptr = extend_heap(extendSize/WSIZE)) == NULL)
-        return NULL;
-    place(ptr, asize);
-    return ptr;
-
+    remove_freeList(ptr);
+    place(ptr, words);
+    return ptr + GET_SIZE(HDRP(ptr)) / WSIZE;
 }
 
 
 void mm_free(void *ptr)
 {
-    size_t size = GET_SIZE(HDRP(ptr));
-    PUT(HDRP(ptr), PACK(size, 0));
-    PUT(FTRP(ptr), PACK(size, 0));
-    coalesce(ptr);
+    ptr -= WSIZE;
+    size_t size = GET_SIZE(ptr);
+    // * Assume: ptr points to the beginning of a block header
+
+    // 여기를 수정해
+    PUT_WORD(ptr, PACK(size, 0));
+    PUT_WORD(FTRP(ptr), PACK(size, 0));
+    ptr = coalesce(ptr);
+
+    add_freeList(ptr);
 }
 
-void add_freeList(void *bp, void **targetList)
+static void add_freeList(char **bp)
 {
-    
-    NEXT_FREE(bp) = *targetList;
-    PREV_FREE(bp) = NULL;
+    size_t size = GET_SIZE(bp);
+    int idx = sizeWizard(size);
 
-    if (*targetList != NULL)
+    char **frontPtr = GET_FREELIST_PTR(idx);
+    char **backPtr = NULL;
+
+    if(size == 0)
+        return;
+
+    if(frontPtr == NULL) // 리스트가 비어있는 상황인 경우
     {
-        PREV_FREE(*targetList) = bp;
-        *targetList = bp;
+        SET_PTR(GET_PTR_SUCC(bp), NULL);
+        SET_PTR(GET_PTR_PRED(bp), NULL);
+        SET_FREELIST_PTR(idx, bp);
+        return;
     }
 
+    if(size >= GET_SIZE(frontPtr)) // 들어갈 블럭이 frontPtr로써 받아들이기에는 현존 블럭 중 제일 큰 경우
+    {
+        SET_FREELIST_PTR(idx, bp);
+        SET_PTR(GET_PTR_SUCC(bp), frontPtr);
+        SET_PTR(GET_PTR_PRED(frontPtr), bp);
+        SET_PTR(GET_PTR_PRED(bp), NULL);
+        return;
+    }
+
+    ///////////// 위의 특수한 경우가 아니라면 아래에서 순회를 실시한다!!! 즉, 이건 LIFO가 아니라 크기 순 정렬이다.
+
+    // 이 리스트는 순서를 지키게끔 한다. 이건 순회하는거임
+    while (frontPtr != NULL && GET_SIZE(frontPtr) > size)
+    {
+        backPtr = frontPtr;
+        frontPtr = cGET_SUCC(frontPtr);
+    }
+
+    if(frontPtr == NULL) // 얘가 끝에 도달해버린경우..
+    {
+        SET_PTR(GET_PTR_SUCC(backPtr), bp);
+        SET_PTR(GET_PTR_PRED(bp), backPtr);
+
+        SET_PTR(GET_PTR_SUCC(bp), NULL);
+        return;
+    }
+    else // 그래도 중간에 자리를 찾은경우
+    {
+        SET_PTR(GET_PTR_SUCC(backPtr), bp);
+        SET_PTR(GET_PTR_PRED(bp), backPtr);
+
+        SET_PTR(GET_PTR_SUCC(bp), frontPtr);
+        SET_PTR(GET_PTR_PRED(frontPtr), bp);
+        return;
+    }
 }
 
-void remove_freeList(void *bp, void** targetList)
+static void remove_freeList(char **ptr)
 {
-    void *prev = PREV_FREE(bp);
-    void *next = NEXT_FREE(bp);
+    char **prevBlock = PREV_FREE(ptr);
+    char **nextBlock = NEXT_FREE(ptr);
+    int idx;
 
-    if(prev != NULL)
-        NEXT_FREE(prev) = next;
+    if(GET_SIZE(ptr) == 0)
+        return;
+
+    if(prevBlock == NULL)
+    {
+        idx = sizeWizard(GET_SIZE(ptr));
+        GET_FREELIST_PTR(idx) = nextBlock;
+    }
     else
-        *targetList = next;
-
-    if (next != NULL)
-        PREV_FREE(next) = prev;
-
-}
-
-
-
-void **getListPointer(int idx)
-{
-    switch(idx)
     {
-        case 0:
-            return &freeList0;
-        case 1:
-            return &freeList1;
-        case 2:
-            return &freeList2;
-        case 3:
-            return &freeList3;
-        case 4:
-            return &freeList4;
-        case 5:
-            return &freeList5;
-        case 6:
-            return &freeList6;
-        case 7:
-            return &freeList7;
-        default:   
-            return NULL;
+       SET_PTR(GET_PTR_SUCC(prevBlock), nextBlock);
     }
+
+    if (nextBlock != NULL)
+        SET_PTR(GET_PTR_SUCC(nextBlock), prevBlock);
+
+    SET_PTR(GET_PTR_PRED(ptr), NULL);
+    SET_PTR(GET_PTR_SUCC(ptr), NULL);
 }
 
-int find_size_class_index(size_t size)
-{
-    if (size <= 24) return 0;
-    else if (size <= 48) return 1;
-    else if (size <= 96) return 2;
-    else if (size <= 192) return 3;
-    else if (size <= 384) return 4;
-    else if (size <= 768) return 5;
-    else if (size <= 1536) return 6;
-    else return 7;
-}
 
-// 최후방 구현 목표
-void relist(void *bps){
-    void *bp = bps;
-    void **targetList = getListPointer(find_size_class_index(GET_SIZE(HDRP(bp))));
-        while (GET_SIZE(HDRP(bp)) > 0)
+static size_t sizeWizard(size_t size)
+{  
+    int index = 0;
+
+    while((index <= MAX_POWER) && (size > 1))
     {
-        if (!GET_ALLOC(HDRP(bp))) 
-            add_freeList(bp, targetList);                                         
-        bp = NEXT_BLKP(bp);                                        
+        size >>= 1;
+        index++;
     }
+    return index;
 }
-
 void *mm_realloc(void *ptr, size_t size)
-{ 
-    int re = 0;
+ {
+     static int previous_size;
+     int buffer_size;
+     int diff = abs(size - previous_size);
+ 
+    // 얘는 좀 신기한게, round_up_power_2 아니면 round_to_thousand를 쓴다.
+    // 2의 제곱으로 떨어지면 바로!!!!!!!!
+     if (diff < 1<<12 && diff % round_up_power_2(diff)) {
+         buffer_size = round_up_power_2(diff);
+     } else {
+         buffer_size = round_to_thousand(size);
+     }
+ 
+     void * return_value = mm_realloc_wrapped(ptr, size, buffer_size);
+ 
+     previous_size = size;
+     return return_value;
+ }
+ 
+ void *mm_realloc_wrapped(void *ptr, size_t size, int buffer_size)
+ {
+ 
+     // equivalent to mm_malloc if ptr is NULL
+     if (ptr == NULL) {
+         return mm_malloc(ptr);
+     }
+ 
+     // adjust to be at start of block
+     char **old = (char **)ptr - 1;
+     char **bp = (char **)ptr - 1;
+ 
+     // get intended and current size
+     size_t new_size = ALIGN(size) / WSIZE; // in words
+     size_t size_with_buffer = new_size + buffer_size;
+     size_t old_size = GET_SIZE(bp); // in words
+ 
+     if (size_with_buffer == old_size && new_size <= size_with_buffer) {
+         return bp + HDR_SIZE;
+     }
+ 
+     if (new_size == 0) {
+         mm_free(ptr);
+         return NULL;
+     } else if (new_size > old_size) {
+         if (GET_SIZE(NEXT_BLKP(bp)) + old_size + 2 >= size_with_buffer &&
+                 GET_STATUS(PREV_BLKP(bp)) == 1 &&
+                 GET_STATUS(NEXT_BLKP(bp)) == 0
+         ) { // checks if possible to merge with previous block in memory
+             PUT_WORD(bp, PACK(old_size, 0));
+         PUT_WORD(FTRP(bp), PACK(old_size, 0));
+ 
+             bp = coalesce(bp);
+             place(bp, size_with_buffer);
+         } else if (GET_SIZE(PREV_BLKP(bp)) + old_size + 2 >= size_with_buffer &&
+                              GET_STATUS(PREV_BLKP(bp)) == 0 &&
+                               GET_STATUS(NEXT_BLKP(bp)) == 1
+         ) { // checks if possible to merge with next block in memory
+           PUT_WORD(bp, PACK(old_size, 0));
+          PUT_WORD(FTRP(bp), PACK(old_size, 0));
+ 
+              bp = coalesce(bp);
+ 
+             memmove(bp + 1, old + 1, old_size * WSIZE);
+              place(bp, size_with_buffer);
+         } else if (GET_SIZE(PREV_BLKP(bp)) + GET_SIZE(NEXT_BLKP(bp)) + old_size + 4 >= size_with_buffer &&
+                              GET_STATUS(PREV_BLKP(bp)) == 0 &&
+                              GET_STATUS(NEXT_BLKP(bp)) == 0
+         ) { // checks if possible to merge with both prev and next block in memory
+             PUT_WORD(bp, PACK(old_size, 0));
+          PUT_WORD(FTRP(bp), PACK(old_size, 0));
+ 
+              bp = coalesce(bp);
+ 
+             memmove(bp + 1, old + 1, old_size * WSIZE);
+             place(bp, size_with_buffer);
+         } else { // end case: if no optimization possible, just do brute force realloc
+             bp = (char **)mm_malloc(size_with_buffer* WSIZE + WSIZE) - 1;
+ 
+             if (bp == NULL) {
+                 return NULL;
+             }
+ 
+             memcpy(bp + 1, old + 1, old_size * WSIZE);
+             mm_free(old + 1);
+         }
+     }
+ 
+     return bp + HDR_SIZE;
+ } 
 
-    if (ptr == NULL) // 포인터가 NULL인 경우 할당만 수행
-    return mm_malloc(size);
 
-if (size <= 0) // size가 0인 경우 메모리 반환만 수행
-{
-    mm_free(ptr);
-    return 0;
-}
-
-    
-void *newptr = mm_malloc(size); // 새로 할당한 블록의 포인터
-if (newptr == NULL)
-    return NULL; 
-
-size_t copySize = GET_SIZE(HDRP(ptr)) - DSIZE; 
-if (size < copySize){
-    copySize = size;
-    re = 1;
-}                           
-                              
-
-memcpy(newptr, ptr, copySize); // 새 블록으로 데이터 복사
-
-if(re){
-    freeList0 = NULL;
-    freeList1 = NULL;
-    freeList2 = NULL;
-    freeList3 = NULL;
-    freeList4 = NULL;
-    freeList5 = NULL;
-    freeList6 = NULL;
-    freeList7 = NULL;
-    relist(newptr);
-} 
-    mm_free(ptr);
-    return newptr;
-
-}
+ int round_to_thousand(size_t x)
+ {
+    // 겨우 realloc에 이게 필요하다고?
+     return x % 1000 >= 500 ? x + 1000 - x % 1000 : x - x % 1000;
+ }
+ 
+ static int round_up_power_2 (int x)
+ {
+    // 겨우 realloc에 이게 필요하다고?
+     if (x < 0)
+         return 0;
+     --x;
+     x |= x >> 1;
+     x |= x >> 2;
+     x |= x >> 4;
+     x |= x >> 8;
+     x |= x >> 16;
+     return x+1;
+ }
+ 
